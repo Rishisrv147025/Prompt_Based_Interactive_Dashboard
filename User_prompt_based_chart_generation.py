@@ -8,8 +8,10 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import LabelEncoder
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Use GPU if available
+# Set device (GPU if available, else CPU)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load spaCy model for text preprocessing
 nlp = spacy.load("en_core_web_sm")
@@ -20,6 +22,7 @@ chart_labels = [
     "areachart", "violin", "sunburst", "treemap", "funnel", "density_heatmap", "density_contour", "clustered_column"
 ]
 
+# Function to generate charts based on user input
 def generate_chart(action, df, highlight_values=None):
     """Generates charts based on the specified action and data."""
     numerical_cols = df.select_dtypes(include=['float64', 'int64']).columns
@@ -30,7 +33,7 @@ def generate_chart(action, df, highlight_values=None):
         st.write("No numerical columns available for chart generation.")
         return
 
-    # Generate charts based on the action input (e.g., histogram, scatter, etc.)
+    # Generate charts based on the action input
     if action == "histogram" and len(numerical_cols) > 0:
         fig = px.histogram(df, x=numerical_cols[0])
         add_highlights(fig, highlight_values)
@@ -126,7 +129,7 @@ def add_highlights(fig, highlight_values, scatter=False):
 def preprocess_text(text):
     """Preprocesses input text by removing stop words and punctuation."""
     doc = nlp(text.lower())
-    return [token.text for token in doc if not token.is_stop and not token.is_punct]
+    return [token.lemma_ for token in doc if not token.is_stop and not token.is_punct]
 
 class ChartDataset(Dataset):
     """Custom dataset for handling text data for model training."""
@@ -149,12 +152,12 @@ class ChartDataset(Dataset):
 
 class TextClassificationModel(nn.Module):
     """Bidirectional LSTM model for text classification."""
-    def __init__(self, vocab_size, embed_dim=100, hidden_dim=128, output_dim=15, dropout=0.5):  # Fix output_dim to 15
+    def __init__(self, vocab_size, embed_dim=100, hidden_dim=128, output_dim=15, dropout=0.5):
         super(TextClassificationModel, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim * 2, output_dim)  # Corrected output dimension to 15
+        self.fc = nn.Linear(hidden_dim * 2, output_dim)
 
     def forward(self, x):
         embedded = self.embedding(x)
@@ -202,12 +205,7 @@ def train_model(train_dataset, vocab_size):
 
 def main():
     # Streamlit interface to upload dataset and interact with the model
-    import streamlit as st
-
-    # Title of the app
     st.title("Data Visualization Tool")
-
-    # Instructions for the user
     st.markdown("""
         ## Instructions
         
@@ -249,20 +247,27 @@ def main():
         df = pd.read_csv(uploaded_file)
         imputer = SimpleImputer(strategy='mean')
         df[df.select_dtypes(include=['float64', 'int64']).columns] = imputer.fit_transform(df[df.select_dtypes(include=['float64', 'int64']).columns])
+        st.write("Dataset uploaded successfully!")
         st.write(df.head())
-        train_dataset, test_dataset, vocab = prepare_dataset()
-        model = train_model(train_dataset, len(vocab))
-        
-        new_prompt = st.text_input("Enter a prompt for chart prediction", "show me a clustered column chart for sales")
-        if new_prompt:
+
+        user_prompt = st.text_input("Enter your visualization prompt:")
+        if user_prompt:
+            # Preprocess the user prompt
+            processed_prompt = preprocess_text(user_prompt)
+            # Tokenize the prompt
+            train_dataset, _, vocab = prepare_dataset()
+            indexed_tokens = [vocab.get(token, vocab["<UNK>"]) for token in processed_prompt]
+            indexed_tokens = indexed_tokens[:50] + [vocab["<PAD>"]] * (50 - len(indexed_tokens))
+            input_tensor = torch.tensor([indexed_tokens]).to(device)
+            # Predict the chart type
+            model = train_model(train_dataset, len(vocab))
             model.eval()
-            new_input = torch.tensor([vocab.get(token, vocab["<UNK>"]) for token in preprocess_text(new_prompt)])
-            new_input = new_input.unsqueeze(0).to(device)  # Add batch dimension
-            prediction = model(new_input)
-            predicted_label = prediction.argmax(dim=1).item()
-            
-            st.write(f"The predicted chart type is: {chart_labels[predicted_label]}")
-            generate_chart(chart_labels[predicted_label], df)
+            with torch.no_grad():
+                outputs = model(input_tensor)
+                _, predicted = torch.max(outputs, dim=1)
+                predicted_chart = chart_labels[predicted.item()]
+                st.write(f"Predicted Chart Type: {predicted_chart}")
+                generate_chart(predicted_chart, df)
 
 if __name__ == "__main__":
     main()
